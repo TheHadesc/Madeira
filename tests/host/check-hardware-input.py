@@ -146,6 +146,32 @@ touchSequence.admit([3, 4])
 assert(!touchSequence.consume(3, beginning: false, ending: true, ignoreAtBegin: true))
 assert(!touchSequence.consume(4, beginning: false, ending: true, ignoreAtBegin: false))
 
+// The observed compatibility-click stream: MOVE|ABSOLUTE|LEFTDOWN at a
+// noncentral point, repeated absolute drag positions, then LEFTUP|ABSOLUTE.
+// With raw mouse-look active, only positionless down/up must reach Windows.
+let clickPoint: (Int32, Int32) = (673, 412)
+let surfaceDown = SurfacePointerEvent.map(x: clickPoint.0, y: clickPoint.1,
+                                         flags: 0x8003, data: 0, hardwareRelative: true)!
+assert(surfaceDown == SurfacePointerEvent(x: 0, y: 0, flags: 0x2, data: 0))
+for x in 0..<1024 {
+    assert(SurfacePointerEvent.map(x: Int32(x), y: 420, flags: 0x8001, data: 0,
+                                   hardwareRelative: true) == nil)
+}
+assert(SurfacePointerEvent.map(x: 595, y: 420, flags: 0x8004, data: 0, hardwareRelative: true)
+       == SurfacePointerEvent(x: 0, y: 0, flags: 0x4, data: 0))
+// Surface relative deltas must not double-count the raw stream either.
+assert(SurfacePointerEvent.map(x: -3, y: 2, flags: 0x1, data: 0, hardwareRelative: true) == nil)
+for flags in [UInt32(0x8), 0x10, 0x20, 0x40, 0x80, 0x100, 0x800, 0x1000] {
+    assert(SurfacePointerEvent.map(x: 100, y: 200, flags: flags | 0x8000, data: 2, hardwareRelative: true)
+           == SurfacePointerEvent(x: 0, y: 0, flags: flags, data: 2))
+}
+// Visible-cursor menus and sessions without a raw mouse retain exact packets,
+// including wheel sign/data and finger relative motion.
+for flags in [UInt32(0x1), 0x8001, 0x8003, 0x8004, 0x8008, 0x8010, 0x800] {
+    assert(SurfacePointerEvent.map(x: 628, y: 446, flags: flags, data: 0xffffff88, hardwareRelative: false)
+           == SurfacePointerEvent(x: 628, y: 446, flags: flags, data: 0xffffff88))
+}
+
 // Held-set diffing: declared sets converge, ups before downs, no duplicates.
 var keys = HeldEdges<Int32>()
 var e = keys.update([0x57, 0xA0])
@@ -643,6 +669,21 @@ switches = ('MADEIRA_HWINPUT', 'MADEIRA_INPUT_FOCUS', 'MADEIRA_DIRECT_CURSOR', '
 for switch in switches:
     check(f'flag("{switch}", defaultOn: true)' in source, f'{switch} switch, default on')
 glue = source.split('// MARK: - Device glue', 1)[1]
+check('Self.enabled && gcDeltaSeen && currentRoute == .relative' in glue,
+      'surface positions are suppressed only when a raw mouse owns the relative route')
+check('SurfacePointerEvent.map(' in glue and 'hardwareRelative: relative' in glue,
+      'surface delivery uses the tested packet policy')
+check('HardwareInput.shared.surfacePointerEvent(x: x, y: y, flags: flags, data: data)' in cv,
+      'MetalBackedView routes surface packets through the hardware policy')
+for phase, method in [('down', 'Down'), ('move', 'Move'), ('up', 'Up')]:
+    calls = re.findall(r'\bwinios_post_touch_' + phase + r'\([^;\n]*', cv)
+    check(len(calls) == 1, f'legacy touch {phase} exists only in its normal-route wrapper')
+    wrapper = cv.split(f'private func postSurfaceTouch{method}', 1)[1].split('\n    }', 1)[0]
+    check('HardwareInput.shared.hardwareOwnsRelativeMotion' in wrapper
+          and 'postSurfacePointer(' in wrapper and f'winios_post_touch_{phase}(' in wrapper,
+          f'touch {phase} preserves the legacy route and maps hardware mouse-look')
+check('postSurfacePointer(ix, iy, F_MOVE)' in cv,
+      'surface relative motion cannot double-count a raw mouse delta')
 check('input.valueChangedHandler =' in glue and 'down: value > 0' in glue,
       'mouse callbacks use the normalized button value')
 check('rawButtons.sample(device, held: Self.heldButtons(inputs))' in glue

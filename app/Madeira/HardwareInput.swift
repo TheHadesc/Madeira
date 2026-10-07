@@ -254,6 +254,23 @@ enum MouseButtonSources {
     }
 }
 
+/// Surface touches can also be compatibility mouse clicks. While a raw mouse
+/// owns mouse-look, their position must never become a second motion stream.
+struct SurfacePointerEvent: Equatable {
+    let x: Int32
+    let y: Int32
+    let flags: UInt32
+    let data: UInt32
+
+    static func map(x: Int32, y: Int32, flags: UInt32, data: UInt32,
+                    hardwareRelative: Bool) -> SurfacePointerEvent? {
+        guard hardwareRelative else { return SurfacePointerEvent(x: x, y: y, flags: flags, data: data) }
+        let buttonsOrWheel = flags & ~UInt32(0x8001) // remove MOVE and ABSOLUTE
+        guard buttonsOrWheel != 0 else { return nil }
+        return SurfacePointerEvent(x: 0, y: 0, flags: buttonsOrWheel, data: data)
+    }
+}
+
 /// Callbacks and sampled state share one edge history. A held button at
 /// attachment must be released before it can generate a new press.
 struct RawMouseButtons<Device: Hashable> {
@@ -740,6 +757,8 @@ final class HardwareInput: ObservableObject {
     private var uikitSeen = false
     private var touchClassLogged = 0
     private var touchFilter = TouchSequenceFilter<ObjectIdentifier>()
+    private var surfaceButtonTraceCount = 0
+    private var surfaceMotionNoted = false
     private var phoneLockNoted = false
     private var hintArmed = false
     private var ticker: Timer?
@@ -1626,6 +1645,30 @@ final class HardwareInput: ObservableObject {
     // iOS pointer is clamped to the screen, so at an edge the hover deltas
     // stop, and iOS has no API to warp or re-centre it. The GCMouse + pointer
     // lock path is the complete solution where the OS provides it.
+
+    /// Includes compatibility clicks reported as direct touches. Real surface
+    /// touches likewise must not warp a camera already driven by the raw mouse.
+    var hardwareOwnsRelativeMotion: Bool {
+        Self.enabled && gcDeltaSeen && currentRoute == .relative
+    }
+
+    func surfacePointerEvent(x: Int32, y: Int32, flags: UInt32, data: UInt32 = 0) -> SurfacePointerEvent? {
+        let relative = hardwareOwnsRelativeMotion
+        let event = SurfacePointerEvent.map(x: x, y: y, flags: flags, data: data, hardwareRelative: relative)
+        if relative {
+            if let event {
+                surfaceButtonTraceCount += 1
+                if surfaceButtonTraceCount <= 40 {
+                    log(String(format: "surface button: in=0x%x out=0x%x data=%u (raw mouse owns motion)",
+                               flags, event.flags, event.data))
+                }
+            } else if !surfaceMotionNoted {
+                surfaceMotionNoted = true
+                log("surface motion suppressed (raw mouse owns motion)")
+            }
+        }
+        return event
+    }
 
     /// Hover over the game view (`inside` false: the pointer left it).
     func pointerHovered(at p: CGPoint, in view: UIView, inside: Bool) {

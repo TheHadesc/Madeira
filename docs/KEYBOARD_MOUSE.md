@@ -110,6 +110,11 @@ while the app is inactive or no mouse is connected. Buttons held on attachment
 or return to the app must be released before a new press is routed. The first
 80 button callback/edge records and routing decisions are logged; diagnostics
 also report sampled values every 10 s.
+While raw mouse motion owns the relative route, game-surface touch packets
+carry only positionless button/wheel events. Surface motion is suppressed,
+including compatibility clicks reported as direct touches: their absolute
+position must not warp the camera or mix with raw deltas during a drag.
+Visible-cursor menus and touch-only sessions retain their original packets.
 Desktop cursor visibility/position metadata also permits relative mouse-look
 and automatic pointer lock when a desktop-hosted game hides its cursor.
 
