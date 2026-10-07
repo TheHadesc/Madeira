@@ -158,11 +158,11 @@ jobs:
             "$RUNNER_TEMP/package/Payload/Madeira.app"
           printf "upstream=48f976429c189f8396e23d251d8a82f43c705922\nbuild=%s\nconfiguration=Debug\n" "$GITHUB_SHA" > "$RUNNER_TEMP/package/Payload/Madeira.app/madeira-build-source.txt"
           cd "$RUNNER_TEMP/package"
-          zip -qry Madeira-usb-mouse-minimal-unsigned.ipa Payload
+          zip -qry Madeira-usb-mouse-buttons-v2-unsigned.ipa Payload
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: Madeira-usb-mouse-minimal-unsigned
-          path: ${{ runner.temp }}/package/Madeira-usb-mouse-minimal-unsigned.ipa
+          name: Madeira-usb-mouse-buttons-v2-unsigned
+          path: ${{ runner.temp }}/package/Madeira-usb-mouse-buttons-v2-unsigned.ipa
           if-no-files-found: error
           retention-days: 3
       - name: Save native prerequisite progress
