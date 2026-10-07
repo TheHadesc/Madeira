@@ -940,6 +940,8 @@ final class HardwareInput: ObservableObject {
         updateAutoLock()
         renderCursor()
         updateFocusTimer()
+        // Scene roots can change without changing the desired lock value.
+        PointerLock.refresh()
     }
 
     /// The app is active, the game view is on screen in the foreground scene,
@@ -1839,56 +1841,105 @@ extension UIResponder {
 // ============================================================================
 // POINTER LOCK.
 //
-// `prefersPointerLocked` hides and pins the iPad system pointer (containment:
-// an unlocked pointer stops at the screen edge and starts hitting the app's
-// own chrome). UIKit asks the KEY WINDOW's root view controller, and this
-// app's root is SwiftUI's own UIHostingController, which the app never
-// constructs and cannot subclass. So the override is ADDED to that concrete
-// class at runtime. Swift generic classes get one ObjC class per
-// specialisation, so the root's class has exactly one instance; the overlay
-// windows' hosting controllers are different specialisations and untouched.
-// iPadOS honours the preference only while the scene is full screen.
+// Request containment on the game's root and the app-owned overlay roots.
+// SwiftUI can forward the preference to a child controller; these roots own
+// the decision instead. Install per concrete hosting class, so a new root
+// after scene reconstruction cannot silently lose the preference. The OS's
+// resolved scene state is distinct from HardwareInput's requested state.
 // ============================================================================
 
 enum PointerLock {
-    private static var installed = false
+    private final class WeakRoot {
+        weak var controller: UIViewController?
+        init(_ controller: UIViewController) { self.controller = controller }
+    }
+    private static var roots: [WeakRoot] = []
+    private static weak var lastScene: UIWindowScene?
+    private static var installedClasses = Set<ObjectIdentifier>()
+    private static var lastRoots = Set<ObjectIdentifier>()
+    private static var lastKeyRoot: ObjectIdentifier?
+    private static var lastWanted: Bool?
+    private static var observing = false
+    private static var lastReport = ""
 
-    /// Re-ask UIKit for the preference. The root controller is re-resolved
-    /// every time: a cached reference that went stale after a scene rebuild
-    /// would silently stop updating it.
+    /// Only controllers constructed by the app are registered; keyboard and
+    /// other system windows must keep their own pointer-lock preferences.
+    static func register(_ root: UIViewController) {
+        include(root)
+        refresh()
+    }
+
+    private static func include(_ root: UIViewController) {
+        roots.removeAll { $0.controller == nil }
+        if !roots.contains(where: { $0.controller === root }) { roots.append(WeakRoot(root)) }
+    }
+
+    private static var wanted: Bool {
+        HardwareInput.shared.pointerLocked && HardwareInput.shared.baseFocused
+    }
+
+    /// Called on preference/focus changes and the existing focus poll. Re-ask
+    /// only when the request, owned roots or key controller actually changed.
     static func refresh() {
         DispatchQueue.main.async {
-            install()
-            keyWindow()?.rootViewController?.setNeedsUpdateOfPrefersPointerLocked()
+            let gameWindow = MetalBackedView.keyboardTarget?.window
+            guard let scene = gameWindow?.windowScene ?? lastScene else { return }
+            lastScene = scene
+            if let root = gameWindow?.rootViewController { include(root) }
+            let controllers = roots.compactMap(\.controller).filter {
+                guard let window = $0.viewIfLoaded?.window else { return false }
+                return window.windowScene === scene && !window.isHidden
+            }
+            let ids = Set(controllers.map { ObjectIdentifier($0) })
+            let keyController = scene.windows.first(where: \.isKeyWindow)?.rootViewController
+            let keyRoot = keyController.map { ObjectIdentifier($0) }
+            let request = wanted
+            guard ids != lastRoots || keyRoot != lastKeyRoot || request != lastWanted else { return }
+            lastRoots = ids; lastKeyRoot = keyRoot; lastWanted = request
+            if !observing {
+                observing = true
+                NotificationCenter.default.addObserver(forName: UIPointerLockState.didChangeNotification,
+                                                       object: nil, queue: .main) { _ in reportState("changed") }
+            }
+            for root in controllers {
+                if request { install(on: root) }
+                root.setNeedsUpdateOfPrefersPointerLocked()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { reportState("request") }
         }
     }
 
-    private static func keyWindow() -> UIWindow? {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first { $0.isKeyWindow }
-    }
-
-    private static func install() {
-        guard !installed else { return }
-        guard let root = keyWindow()?.rootViewController else {
-            fputs("[hwinput] pointer lock: no key window yet (will retry)\n", stderr)
-            return
-        }
+    private static func install(on root: UIViewController) {
         guard let cls: AnyClass = object_getClass(root) else { return }
+        guard installedClasses.insert(ObjectIdentifier(cls)).inserted else { return }
         let sel = NSSelectorFromString("prefersPointerLocked")
-        let body: @convention(block) (AnyObject) -> Bool = { _ in
-            HardwareInput.shared.pointerLocked
-        }
+        let body: @convention(block) (AnyObject) -> Bool = { _ in wanted }
         let imp = imp_implementationWithBlock(body)
-        // "B@:": returns BOOL, takes self and _cmd. Add first; replace only if
-        // this exact class already had one.
         if !class_addMethod(cls, sel, imp, "B@:") {
             _ = class_replaceMethod(cls, sel, imp, "B@:")
         }
-        installed = true
-        fputs("[hwinput] pointer lock installed on \(NSStringFromClass(cls))\n", stderr)
+        // A container's child preference otherwise supersedes its own getter.
+        let childSel = NSSelectorFromString("childViewControllerForPointerLock")
+        let childBody: @convention(block) (AnyObject) -> UIViewController? = { _ in nil }
+        let childImp = imp_implementationWithBlock(childBody)
+        if !class_addMethod(cls, childSel, childImp, "@@:") {
+            _ = class_replaceMethod(cls, childSel, childImp, "@@:")
+        }
+        fputs("[hwinput] pointer lock owner installed on \(NSStringFromClass(cls))\n", stderr)
+    }
+
+    private static func reportState(_ why: String) {
+        guard let scene = MetalBackedView.keyboardTarget?.window?.windowScene ?? lastScene else { return }
+        let state = scene.pointerLockState
+        let owners = roots.compactMap(\.controller).filter { $0.viewIfLoaded?.window?.windowScene === scene }
+        let prefs = owners.map { $0.prefersPointerLocked ? "1" : "0" }.joined(separator: ",")
+        let fullSize = scene.coordinateSpace.bounds.size == scene.screen.bounds.size
+        let line = "requested=\(wanted ? 1 : 0) actual=\(state?.isLocked == true ? 1 : 0) "
+            + "available=\(state != nil) active=\(scene.activationState == .foregroundActive) "
+            + "fullSize=\(fullSize) owners=\(prefs) assistiveTouch=\(UIAccessibility.isAssistiveTouchRunning)"
+        guard line != lastReport else { return }
+        lastReport = line
+        fputs("[hwinput] system pointer lock (\(why)): \(line)\n", stderr)
     }
 }
 

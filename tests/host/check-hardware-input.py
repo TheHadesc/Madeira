@@ -684,6 +684,26 @@ for phase, method in [('down', 'Down'), ('move', 'Move'), ('up', 'Up')]:
           f'touch {phase} preserves the legacy route and maps hardware mouse-look')
 check('postSurfacePointer(ix, iy, F_MOVE)' in cv,
       'surface relative motion cannot double-count a raw mouse delta')
+lock = glue.split('enum PointerLock {', 1)[1].split('final class PointerHider', 1)[0]
+check('installedClasses.insert(ObjectIdentifier(cls)).inserted' in lock
+      and 'private static var installed = false' not in lock,
+      'pointer-lock hooks are installed per hosting class after root replacement')
+check('NSSelectorFromString("childViewControllerForPointerLock")' in lock
+      and 'childBody: @convention(block) (AnyObject) -> UIViewController? = { _ in nil }' in lock,
+      'the owned root keeps the lock preference rather than delegating it to a child')
+check(cv.count('PointerLock.register(host)') == 2,
+      'both app-owned overlay roots participate in the lock request')
+check('MetalBackedView.keyboardTarget?.window' in lock
+      and 'window.windowScene === scene && !window.isHidden' in lock,
+      'lock requests stay with visible owned roots in the game scene')
+check('scene.pointerLockState' in lock and 'state?.isLocked == true' in lock
+      and 'UIPointerLockState.didChangeNotification' in lock,
+      'diagnostics observe the resolved system lock, separately from its request')
+check('keyRoot != lastKeyRoot' in lock and 'request != lastWanted' in lock,
+      'key-controller and focus/preference changes refresh the lock request')
+check('private static weak var lastScene: UIWindowScene?' in lock
+      and 'gameWindow?.windowScene ?? lastScene' in lock,
+      'the previous scene can release its lock after the game surface detaches')
 check('input.valueChangedHandler =' in glue and 'down: value > 0' in glue,
       'mouse callbacks use the normalized button value')
 check('rawButtons.sample(device, held: Self.heldButtons(inputs))' in glue

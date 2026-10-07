@@ -121,6 +121,14 @@ and automatic pointer lock when a desktop-hosted game hides its cursor.
 **Gain:** relative mouse motion has its own sensitivity (`sensMouse`, default
 1.0 = the device's deltas unchanged).
 
+**iPad:** native mouse support does not require AssistiveTouch. If primary
+clicks arrive as finger gestures, try disabling it under Settings >
+Accessibility > Touch > AssistiveTouch and restart Madeira. The touch engine
+resolves a short tap on release, which can post both button edges together;
+games polling held state can miss that pulse. AssistiveTouch can consume the
+primary button while secondary buttons still reach GameController (also
+documented for [Citrix's generic mouse input](https://docs.citrix.com/en-us/citrix-workspace-app-for-ios/configure/peripheral-devices.html)).
+
 **iPhone:** pointer devices are routed only through AssistiveTouch (Settings >
 Accessibility > Touch > AssistiveTouch > On, then Devices). If a mouse is
 enumerated but reports nothing for 10 s, the app shows this path once. With
@@ -164,6 +172,12 @@ arriving at the screen edges and the pointer cannot wander onto the app's own
 buttons. iPadOS honours it only while Madeira is full screen, and only on the
 GCMouse path (on the UIKit path locking would stop pointer delivery, so it is
 refused). iPhone has no lockable pointer and shows no lock control.
+The game root and app-owned overlay roots request the same preference without
+forwarding it to SwiftUI child controllers. New hosting classes are installed
+as roots change. The `[hwinput] system pointer lock` line reports both
+`requested` and the scene's resolved `actual` state; `actual=1` is confirmation
+that iPadOS granted it. A request alone is not proof of containment; see
+[Apple's pointer-lock contract](https://developer.apple.com/documentation/uikit/uiviewcontroller/preferspointerlocked).
 
 - **Automatic:** while a program on the game view hides its cursor (for half a
   second, so a program about to show one does not lock), the pointer is over
