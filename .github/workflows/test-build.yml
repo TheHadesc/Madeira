@@ -1,4 +1,4 @@
-name: USB mouse click-motion test IPA
+name: USB mouse pointer-lock test IPA
 
 on:
   push:
@@ -162,15 +162,15 @@ jobs:
           from pathlib import Path
           path = Path(os.environ['RUNNER_TEMP']) / 'package/Payload/Madeira.app/Info.plist'
           info = plistlib.loads(path.read_bytes())
-          info['MadeiraBuild'] = 'usb-mouse-v3 ' + os.environ['GITHUB_SHA'][:7]
+          info['MadeiraBuild'] = 'usb-mouse-v4 ' + os.environ['GITHUB_SHA'][:7]
           path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY, sort_keys=False))
           PY
           cd "$RUNNER_TEMP/package"
-          zip -qry Madeira-usb-mouse-click-motion-v3-unsigned.ipa Payload
+          zip -qry Madeira-usb-mouse-pointer-lock-v4-unsigned.ipa Payload
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: Madeira-usb-mouse-click-motion-v3-unsigned
-          path: ${{ runner.temp }}/package/Madeira-usb-mouse-click-motion-v3-unsigned.ipa
+          name: Madeira-usb-mouse-pointer-lock-v4-unsigned
+          path: ${{ runner.temp }}/package/Madeira-usb-mouse-pointer-lock-v4-unsigned.ipa
           if-no-files-found: error
           retention-days: 3
       - name: Save native prerequisite progress
