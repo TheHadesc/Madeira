@@ -1,4 +1,4 @@
-name: USB mouse minimal test IPA
+name: USB mouse click-motion test IPA
 
 on:
   push:
@@ -157,12 +157,20 @@ jobs:
           ditto "$RUNNER_TEMP/madeira-derived/Build/Products/Debug-iphoneos/Madeira.app" \
             "$RUNNER_TEMP/package/Payload/Madeira.app"
           printf "upstream=48f976429c189f8396e23d251d8a82f43c705922\nbuild=%s\nconfiguration=Debug\n" "$GITHUB_SHA" > "$RUNNER_TEMP/package/Payload/Madeira.app/madeira-build-source.txt"
+          python3 - <<'PY'
+          import os, plistlib
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'package/Payload/Madeira.app/Info.plist'
+          info = plistlib.loads(path.read_bytes())
+          info['MadeiraBuild'] = 'usb-mouse-v3 ' + os.environ['GITHUB_SHA'][:7]
+          path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY, sort_keys=False))
+          PY
           cd "$RUNNER_TEMP/package"
-          zip -qry Madeira-usb-mouse-buttons-v2-unsigned.ipa Payload
+          zip -qry Madeira-usb-mouse-click-motion-v3-unsigned.ipa Payload
       - uses: actions/upload-artifact@v7.0.1
         with:
-          name: Madeira-usb-mouse-buttons-v2-unsigned
-          path: ${{ runner.temp }}/package/Madeira-usb-mouse-buttons-v2-unsigned.ipa
+          name: Madeira-usb-mouse-click-motion-v3-unsigned
+          path: ${{ runner.temp }}/package/Madeira-usb-mouse-click-motion-v3-unsigned.ipa
           if-no-files-found: error
           retention-days: 3
       - name: Save native prerequisite progress
