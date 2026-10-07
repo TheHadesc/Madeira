@@ -88,6 +88,58 @@ assert(mouseEdges.update(fallbackPress).down == [.right])
 assert(mouseEdges.update(fallbackPress).down.isEmpty)
 assert(mouseEdges.update(MouseButtonSources.merge(current: fallbackPress, fallback: [], rawSeen: [], focused: true)).up == [.right])
 
+// Raw callbacks plus polling: one down per physical press, a missed up is
+// recovered from zero state, and a stationary hold has no expiry.
+var raw = RawMouseButtons<Int>()
+raw.attach(1, held: [])
+assert(raw.update(1, button: .left, down: true).down == [.left])
+for _ in 0..<1000 {
+    let same = raw.sample(1, held: [.left])
+    assert(same.up.isEmpty && same.down.isEmpty)
+}
+assert(raw.update(1, button: .left, down: true).down.isEmpty)
+assert(raw.sample(1, held: []).up == [.left])
+assert(raw.update(1, button: .left, down: false).up.isEmpty)
+assert(raw.sample(1, held: [.right]).down == [.right])
+assert(raw.update(1, button: .right, down: false).up == [.right])
+// A held button at attach is not a fresh click. Two mice can hold one button;
+// releasing/disconnecting one must not release the other.
+raw.attach(2, held: [.left])
+assert(raw.sample(2, held: [.left]).down.isEmpty)
+assert(raw.sample(2, held: []).up.isEmpty)
+assert(raw.update(2, button: .left, down: true).down == [.left])
+assert(raw.update(1, button: .left, down: true).down.isEmpty)
+assert(raw.detach(2).up.isEmpty)
+assert(raw.detach(1).up == [.left])
+assert(raw.update(1, button: .left, down: true).down.isEmpty)
+// Focus loss releases the program; sampling a still-held physical button
+// after focus returns must not manufacture another press.
+raw.attach(1, held: [])
+let beforeBlur = raw.update(1, button: .left, down: true)
+var program = HeldEdges<MouseButton>()
+assert(program.update(Set(beforeBlur.down)).down == [.left])
+assert(program.update([]).up == [.left])
+assert(raw.sample(1, held: [.left]).down.isEmpty)
+assert(raw.sample(1, held: []).up == [.left])
+assert(raw.update(1, button: .left, down: true).down == [.left])
+
+// Values changed while the app was inactive are seeded rather than replayed.
+assert(raw.resume(1, held: [.left, .right]).up == [.left])
+assert(raw.sample(1, held: [.left, .right]).down.isEmpty)
+assert(raw.sample(1, held: []).up.isEmpty)
+assert(raw.update(1, button: .right, down: true).down == [.right])
+
+// A direct touch admitted before a raw mouse report must still deliver its
+// release; a consumed synthetic touch stays consumed after mouse activity ends.
+var touchSequence = TouchSequenceFilter<Int>()
+assert(!touchSequence.consume(1, beginning: true, ending: false, ignoreAtBegin: false))
+assert(!touchSequence.consume(1, beginning: false, ending: true, ignoreAtBegin: true))
+assert(touchSequence.consume(2, beginning: true, ending: false, ignoreAtBegin: true))
+assert(touchSequence.consume(2, beginning: false, ending: false, ignoreAtBegin: false))
+assert(touchSequence.consume(2, beginning: false, ending: true, ignoreAtBegin: false))
+assert(!touchSequence.consume(2, beginning: true, ending: false, ignoreAtBegin: false))
+assert(!touchSequence.consume(2, beginning: false, ending: true, ignoreAtBegin: false))
+
 // Held-set diffing: declared sets converge, ups before downs, no duplicates.
 var keys = HeldEdges<Int32>()
 var e = keys.update([0x57, 0xA0])
@@ -585,6 +637,15 @@ switches = ('MADEIRA_HWINPUT', 'MADEIRA_INPUT_FOCUS', 'MADEIRA_DIRECT_CURSOR', '
 for switch in switches:
     check(f'flag("{switch}", defaultOn: true)' in source, f'{switch} switch, default on')
 glue = source.split('// MARK: - Device glue', 1)[1]
+check('input.valueChangedHandler =' in glue and 'down: value > 0' in glue,
+      'mouse callbacks use the normalized button value')
+check('rawButtons.sample(device, held: Self.heldButtons(inputs))' in glue
+      and 'DispatchSource.makeTimerSource(queue: self.mouseQueue)' in glue,
+      'button state sampling shares the serial callback queue and edge history')
+check('updateButtonPolling(active: appActive && mouseConnected)' in glue,
+      'button polling stops while inactive or disconnected')
+check('touchFilter.consume(ObjectIdentifier(touch)' in glue,
+      'touch interception keeps the press decision through release/cancellation')
 # Every path to the program goes through the focus decision.
 check('keys.wanted(focused: keyboardFocused)' in glue and 'keys.press(vk, focused: keyboardFocused)' in glue,
       'keys reach the program only with keyboard focus')

@@ -254,6 +254,70 @@ enum MouseButtonSources {
     }
 }
 
+/// Callbacks and sampled state share one edge history. A held button at
+/// attachment must be released before it can generate a new press.
+struct RawMouseButtons<Device: Hashable> {
+    private var physical: [Device: Set<MouseButton>] = [:]
+    private var blocked: [Device: Set<MouseButton>] = [:]
+    private var posted = HeldEdges<MouseButton>()
+
+    mutating func attach(_ device: Device, held: Set<MouseButton>) {
+        guard physical[device] == nil else { return }
+        physical[device] = held
+        blocked[device] = held
+    }
+
+    mutating func update(_ device: Device, button: MouseButton, down: Bool)
+        -> (up: [MouseButton], down: [MouseButton]) {
+        guard var held = physical[device] else { return ([], []) }
+        if down { held.insert(button) } else { held.remove(button) }
+        return sample(device, held: held)
+    }
+
+    mutating func sample(_ device: Device, held: Set<MouseButton>)
+        -> (up: [MouseButton], down: [MouseButton]) {
+        guard physical[device] != nil else { return ([], []) }
+        physical[device] = held
+        blocked[device] = (blocked[device] ?? []).intersection(held)
+        return edges()
+    }
+
+    mutating func detach(_ device: Device) -> (up: [MouseButton], down: [MouseButton]) {
+        physical.removeValue(forKey: device)
+        blocked.removeValue(forKey: device)
+        return edges()
+    }
+
+    mutating func resume(_ device: Device, held: Set<MouseButton>) -> (up: [MouseButton], down: [MouseButton]) {
+        physical[device] = held
+        blocked[device] = held
+        return edges()
+    }
+
+    private mutating func edges() -> (up: [MouseButton], down: [MouseButton]) {
+        var held: Set<MouseButton> = []
+        for (device, buttons) in physical {
+            held.formUnion(buttons.subtracting(blocked[device] ?? []))
+        }
+        return posted.update(held)
+    }
+}
+
+/// A release follows the decision made for its press, even if another input
+/// source becomes active between them.
+struct TouchSequenceFilter<Identity: Hashable> {
+    private var ignored: Set<Identity> = []
+
+    mutating func consume(_ id: Identity, beginning: Bool, ending: Bool, ignoreAtBegin: Bool) -> Bool {
+        if beginning {
+            if ignoreAtBegin { ignored.insert(id) } else { ignored.remove(id) }
+        }
+        let drop = ignored.contains(id)
+        if ending { ignored.remove(id) }
+        return drop
+    }
+}
+
 /// Relative motion with the truncation remainder carried. The integer handed
 /// to Wine loses a fraction on every event, and at a gain below 1.0 (or with
 /// AssistiveTouch's already-scaled fractional deltas) that fraction is the
@@ -607,6 +671,7 @@ final class HardwareInput: ObservableObject {
     /// iPhone: presses waiting for the tap that says where they belong.
     private var pendingButtons: [MouseButton: (at: CFTimeInterval, released: Bool)] = [:]
     private var gcButtonSeen = false
+    private var buttonRouteTraceCount = 0
 
     // MARK: cursor and lock state (main thread)
 
@@ -632,6 +697,12 @@ final class HardwareInput: ObservableObject {
     /// re-render on the main queue. Motion is posted from here directly:
     /// `winios_pointer` pushes into a mutex-guarded ring. Buttons hop to main.
     private let mouseQueue = DispatchQueue(label: "madeira.hwinput.mouse", qos: .userInteractive)
+    // Owned exclusively by mouseQueue, including timer and callback delivery.
+    private var rawProfiles: [ObjectIdentifier: GCMouseInput] = [:]
+    private var rawButtons = RawMouseButtons<ObjectIdentifier>()
+    private var buttonPoller: DispatchSourceTimer?
+    private var rawButtonTraceCount = 0
+    private var lastButtonSampleLog: CFTimeInterval = 0
     private let motionLock = NSLock()
     private var carry = MotionCarry()
     private var wheel = WheelAccumulator()
@@ -666,6 +737,7 @@ final class HardwareInput: ObservableObject {
     private var gcButtonsSeen = Set<MouseButton>()
     private var uikitSeen = false
     private var touchClassLogged = 0
+    private var touchFilter = TouchSequenceFilter<ObjectIdentifier>()
     private var phoneLockNoted = false
     private var hintArmed = false
     private var ticker: Timer?
@@ -826,6 +898,7 @@ final class HardwareInput: ObservableObject {
         let over = hoverSeen ? pointerOver : clickFocus.onGame
         let mouse = base && (!Self.focusEnabled || pointerLocked || over || !gameButtons.isEmpty)
         baseFocused = base
+        updateButtonPolling(active: appActive && mouseConnected)
         if keyboard != keyboardFocused {
             keyboardFocused = keyboard
             if !keyboard { keys.focusLost() }
@@ -965,7 +1038,7 @@ final class HardwareInput: ObservableObject {
 
     // HANDLER SIGNATURES, since a wrong one compiles and then never fires:
     //   mouseInput.mouseMovedHandler  : (GCMouseInput, Float, Float) -> Void
-    //   button.pressedChangedHandler  : (GCControllerButtonInput, Float, Bool) -> Void
+    //   button.valueChangedHandler    : (GCControllerButtonInput, Float, Bool) -> Void
     //   scroll.valueChangedHandler    : (GCControllerDirectionPad, Float, Float) -> Void
     // `pressedChangedHandler` and `valueChangedHandler` on a button share one
     // type, so assigning to the wrong one type-checks and changes semantics.
@@ -984,21 +1057,19 @@ final class HardwareInput: ObservableObject {
         m.mouseMovedHandler = { [weak self] _, dx, dy in
             self?.moved(Double(dx), Double(dy))
         }
-        m.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in
-            self?.gcButton(.left, pressed)
-        }
-        m.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in
-            self?.gcButton(.right, pressed)
-        }
-        m.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in
-            self?.gcButton(.middle, pressed)
-        }
-        // Side buttons in the order the device reports them. Windows has
-        // exactly two; anything beyond is dropped rather than invented.
-        for (i, aux) in (m.auxiliaryButtons ?? []).enumerated() where i < 2 {
-            let b: MouseButton = i == 0 ? .x1 : .x2
-            aux.pressedChangedHandler = { [weak self] _, _, pressed in
-                self?.gcButton(b, pressed)
+        let device = ObjectIdentifier(mouse)
+        mouseQueue.async { [weak self] in
+            guard let self else { return }
+            let inputs = Self.buttonInputs(m)
+            self.rawProfiles[device] = m
+            self.rawButtons.attach(device, held: Self.heldButtons(inputs))
+            for (b, input) in inputs {
+                input.valueChangedHandler = { [weak self] _, value, pressed in
+                    guard let self, self.rawProfiles[device] != nil else { return }
+                    let edges = self.rawButtons.update(device, button: b, down: value > 0)
+                    self.traceButton("callback", "b=\(b.rawValue) value=\(value) pressed=\(pressed)")
+                    self.deliverRawButtons(edges, source: "callback")
+                }
             }
         }
         m.scroll.valueChangedHandler = { [weak self] _, x, y in
@@ -1023,7 +1094,15 @@ final class HardwareInput: ObservableObject {
     }
 
     private func detachMouse(_ mouse: GCMouse?) {
-        if let mouse { attachedMice.remove(ObjectIdentifier(mouse)) }
+        if let mouse {
+            let device = ObjectIdentifier(mouse)
+            attachedMice.remove(device)
+            mouseQueue.async { [weak self] in
+                guard let self else { return }
+                self.rawProfiles.removeValue(forKey: device)
+                self.deliverRawButtons(self.rawButtons.detach(device), source: "disconnect")
+            }
+        }
         gcButtonsSeen.removeAll()
         pendingButtons.removeAll()
         gameButtons.removeAll()
@@ -1044,6 +1123,70 @@ final class HardwareInput: ObservableObject {
         log("mouse disconnected: \(mouse?.vendorName ?? "?") (remaining=\(remaining.count) "
             + "path=\(mousePath.rawValue))")
         refreshFocus("mouse disconnected")
+    }
+
+    private static func buttonInputs(_ m: GCMouseInput) -> [(MouseButton, GCControllerButtonInput)] {
+        var inputs: [(MouseButton, GCControllerButtonInput)] = [(.left, m.leftButton)]
+        if let right = m.rightButton { inputs.append((.right, right)) }
+        if let middle = m.middleButton { inputs.append((.middle, middle)) }
+        for (i, input) in (m.auxiliaryButtons ?? []).prefix(2).enumerated() {
+            inputs.append((i == 0 ? .x1 : .x2, input))
+        }
+        return inputs
+    }
+
+    private static func heldButtons(_ inputs: [(MouseButton, GCControllerButtonInput)]) -> Set<MouseButton> {
+        Set(inputs.compactMap { $0.1.value > 0 ? $0.0 : nil })
+    }
+
+    /// Sample actual values to recover an edge whose callback was not delivered.
+    /// No hold timeout: a stationary held button remains down until its value
+    /// is zero. Callback delivery still preserves clicks between timer ticks.
+    private func updateButtonPolling(active: Bool) {
+        mouseQueue.async { [weak self] in
+            guard let self else { return }
+            if !active {
+                self.buttonPoller?.cancel()
+                self.buttonPoller = nil
+            } else if self.buttonPoller == nil {
+                // Do not replay a press made while polling was suspended.
+                for (device, profile) in self.rawProfiles {
+                    self.deliverRawButtons(self.rawButtons.resume(device, held: Self.heldButtons(Self.buttonInputs(profile))),
+                                           source: "resume")
+                }
+                let timer = DispatchSource.makeTimerSource(queue: self.mouseQueue)
+                timer.schedule(deadline: .now(), repeating: .milliseconds(4), leeway: .milliseconds(1))
+                timer.setEventHandler { [weak self] in self?.sampleMouseButtons() }
+                self.buttonPoller = timer
+                timer.resume()
+            }
+        }
+    }
+
+    private func sampleMouseButtons() {
+        let now = CACurrentMediaTime()
+        let report = InputSettings.shared.diagnostics && now - lastButtonSampleLog >= 10
+        if report { lastButtonSampleLog = now }
+        for (device, profile) in rawProfiles {
+            let inputs = Self.buttonInputs(profile)
+            deliverRawButtons(rawButtons.sample(device, held: Self.heldButtons(inputs)), source: "sample")
+            if report {
+                let values = inputs.map { "\($0.0.rawValue)=\($0.1.value)/\($0.1.isPressed)" }.joined(separator: " ")
+                log("button sample: \(values)")
+            }
+        }
+    }
+
+    private func traceButton(_ source: String, _ detail: String) {
+        rawButtonTraceCount += 1
+        if rawButtonTraceCount <= 80 || (InputSettings.shared.diagnostics && rawButtonTraceCount % 100 == 0) {
+            log("button \(source) #\(rawButtonTraceCount): \(detail)")
+        }
+    }
+
+    private func deliverRawButtons(_ edges: (up: [MouseButton], down: [MouseButton]), source: String) {
+        for b in edges.up { traceButton(source, "b=\(b.rawValue) up"); gcButton(b, false) }
+        for b in edges.down { traceButton(source, "b=\(b.rawValue) down"); gcButton(b, true) }
     }
 
     /// GameController reports y pointing UP, like a desk; Windows reports y
@@ -1217,6 +1360,11 @@ final class HardwareInput: ObservableObject {
             gameButtons.remove(b)
         }
         syncButtons()
+        buttonRouteTraceCount += 1
+        if buttonRouteTraceCount <= 80 {
+            log("button route: b=\(b.rawValue) down=\(pressed) base=\(baseFocused) mouse=\(mouseFocused) "
+                + "locked=\(pointerLocked) posted=\(buttonsPosted.down.contains(b))")
+        }
         // A drag that left the game view keeps the mouse only while held.
         if !pressed && gameButtons.isEmpty { refreshFocus("button up") }
         startTicker()
@@ -1412,7 +1560,13 @@ final class HardwareInput: ObservableObject {
             }
             return true
         }
-        let drop = shouldIgnore(touches, logging: phase == .began)
+        var drop = !touches.isEmpty
+        for touch in touches {
+            let ignore = phase == .began && shouldIgnore(touch, logging: true)
+            let consumed = touchFilter.consume(ObjectIdentifier(touch), beginning: phase == .began,
+                                               ending: phase == .ended || phase == .cancelled, ignoreAtBegin: ignore)
+            if !consumed { drop = false }
+        }
         if !drop, phase == .began { setMouseInUse(false) }
         return drop
     }

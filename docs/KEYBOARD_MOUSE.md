@@ -104,6 +104,12 @@ Buttons are left, right, middle and the two side buttons
 Button sources are chosen per button. A GCMouse movement report alone does
 not disable indirect-pointer clicks: buttons without raw reports can use the
 fallback, while raw-reported buttons retain their holds without duplicate edges.
+Raw button value callbacks and a 4 ms state sample share one edge history.
+Sampling recovers missing callbacks without expiring a held button; it stops
+while the app is inactive or no mouse is connected. Buttons held on attachment
+or return to the app must be released before a new press is routed. The first
+80 button callback/edge records and routing decisions are logged; diagnostics
+also report sampled values every 10 s.
 Desktop cursor visibility/position metadata also permits relative mouse-look
 and automatic pointer lock when a desktop-hosted game hides its cursor.
 
@@ -117,7 +123,9 @@ AssistiveTouch, a click also arrives as a synthesised finger touch at the
 AssistiveTouch cursor, which would snap the program's cursor there. While the
 mouse is in use (a GCMouse delta in the last 2 s), touches on the game view
 with no contact patch, or within 50 ms of a GCMouse button change, are
-dropped. The first 30 classifications are logged. Set
+dropped. The decision is retained through release/cancellation, so a touch
+admitted on press cannot lose its release when the raw mouse becomes active.
+The first 30 classifications are logged. Set
 `"ignoreTouchesWithMouse": false` in `Documents/madeira-input.json` to turn the
 filter off. The on-screen touch controls are not filtered. AssistiveTouch's own
 cursor cannot be hidden by an app; the program's drawn cursor is the one that
