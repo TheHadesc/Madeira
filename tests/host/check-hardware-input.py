@@ -75,6 +75,19 @@ assert(MouseButton.middle.event(down: true) == (0x0020, 0) && MouseButton.middle
 assert(MouseButton.x1.event(down: true) == (0x0080, 1) && MouseButton.x1.event(down: false) == (0x0100, 1))
 assert(MouseButton.x2.event(down: true) == (0x0080, 2) && MouseButton.x2.event(down: false) == (0x0100, 2))
 
+// A movement-only raw stream must leave fallback clicks available. Sources
+// are selected per button, so a raw left hold can coexist with fallback right.
+assert(MouseButtonSources.merge(current: [], fallback: [.left, .right], rawSeen: [], focused: true) == [.left, .right])
+assert(MouseButtonSources.merge(current: [.left], fallback: [.right], rawSeen: [.left], focused: true) == [.left, .right])
+assert(MouseButtonSources.merge(current: [.left, .right], fallback: [], rawSeen: [.left], focused: true) == [.left])
+assert(MouseButtonSources.merge(current: [], fallback: [.left], rawSeen: [.left], focused: true).isEmpty)
+assert(MouseButtonSources.merge(current: [.left], fallback: [.right], rawSeen: [.left], focused: false).isEmpty)
+var mouseEdges = HeldEdges<MouseButton>()
+let fallbackPress = MouseButtonSources.merge(current: [], fallback: [.right], rawSeen: [], focused: true)
+assert(mouseEdges.update(fallbackPress).down == [.right])
+assert(mouseEdges.update(fallbackPress).down.isEmpty)
+assert(mouseEdges.update(MouseButtonSources.merge(current: fallbackPress, fallback: [], rawSeen: [], focused: true)).up == [.right])
+
 // Held-set diffing: declared sets converge, ups before downs, no duplicates.
 var keys = HeldEdges<Int32>()
 var e = keys.update([0x57, 0xA0])
@@ -205,6 +218,13 @@ assert(PointerPolicy.route(focused: true, hover: true, locked: true, cursorShown
 assert(PointerPolicy.route(focused: true, hover: true, locked: false, cursorShown: false, absoluteAllowed: true) == .relative)
 assert(PointerPolicy.route(focused: true, hover: false, locked: false, cursorShown: true, absoluteAllowed: true) == .relative)
 assert(PointerPolicy.route(focused: true, hover: true, locked: false, cursorShown: true, absoluteAllowed: false) == .relative)
+// A virtual desktop is not evidence that a game's cursor is visible.
+assert(PointerPolicy.cursorShown(desktop: true, directEnabled: true, reports: 0, shown: false))
+assert(PointerPolicy.cursorShown(desktop: true, directEnabled: true, reports: 1, shown: true))
+let hiddenDesktopCursor = PointerPolicy.cursorShown(desktop: true, directEnabled: true, reports: 1, shown: false)
+assert(!hiddenDesktopCursor)
+assert(PointerPolicy.route(focused: true, hover: true, locked: false, cursorShown: hiddenDesktopCursor, absoluteAllowed: true) == .relative)
+assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: false, reports: 1, shown: true))
 
 // Automatic lock: only for a live program that hides its cursor under the pointer.
 func lockAction(locked: Bool = false, byUs: Bool = false, shown: Bool = false, hiddenFor: Double = 1,
@@ -517,8 +537,8 @@ print('PASS: direct-mode cursor state: inert until enabled, first-report and tra
       'coalescing, visibility, image copy and bounds, concurrent reports')
 
 # ------------------------------------------------------- 4. Source wiring ---
-# The driver: reports only in direct mode and only once the app asked; the
-# desktop compositor path is unchanged; what the program sees is unchanged.
+# Cursor metadata is enabled only once the app asked, including desktop mode;
+# the compositor still owns the desktop cursor's image and drawing.
 check('if (!winios_desktop_mode() || !winios_cursor_set) return;' not in driver
       and 'cursor_set = winios_direct_cursor_set;' in driver
       and 'if (!winios_direct_cursor_on()) return;' in driver,
@@ -533,9 +553,9 @@ check('winios_user_driver.pSetCursorPos = winios_drv_set_cursor_pos;' in driver
       'pSetCursorPos reports and succeeds, as nulldrv does')
 check('if ((flags & MOUSEEVENTF_MOVE) && winios_direct_cursor_on()) winios_report_cursor_pos();' in driver,
       'every posted move reports where the server put the cursor')
-check(re.search(r'static int winios_direct_cursor_on\(void\)\s*\{\s*return !winios_desktop_mode\(\) && '
+check(re.search(r'static int winios_direct_cursor_on\(void\)\s*\{\s*return '
                 r'winios_direct_cursor_wanted && winios_direct_cursor_wanted\(\);', driver) is not None,
-      'the reports are gated on direct mode and the app')
+      'cursor metadata is gated on the app, available in both session modes')
 for sym in ('winios_direct_cursor_wanted', 'winios_direct_cursor_set', 'winios_direct_cursor_show',
             'winios_direct_cursor_pos'):
     check(re.search(sym + r'\([^;]*\)\s*__attribute__\(\(weak\)\);', driver) is not None, f'{sym} is a weak import')

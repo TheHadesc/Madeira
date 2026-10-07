@@ -245,6 +245,15 @@ struct HeldEdges<T: Hashable & Comparable> {
     }
 }
 
+/// Raw-reported buttons keep their authority independently of mouse movement.
+enum MouseButtonSources {
+    static func merge(current: Set<MouseButton>, fallback: Set<MouseButton>,
+                      rawSeen: Set<MouseButton>, focused: Bool) -> Set<MouseButton> {
+        guard focused else { return [] }
+        return current.intersection(rawSeen).union(fallback.subtracting(rawSeen))
+    }
+}
+
 /// Relative motion with the truncation remainder carried. The integer handed
 /// to Wine loses a fraction on every event, and at a gain below 1.0 (or with
 /// AssistiveTouch's already-scaled fractional deltas) that fraction is the
@@ -442,6 +451,10 @@ enum PointerRoute: String {
 }
 
 enum PointerPolicy {
+    static func cursorShown(desktop: Bool, directEnabled: Bool, reports: UInt32, shown: Bool) -> Bool {
+        if desktop { return reports == 0 || shown }
+        return directEnabled && shown
+    }
     /// - focused: the mouse belongs to the program right now;
     /// - hover: the system reports where the pointer is (iPad, not AssistiveTouch);
     /// - locked: pointer lock is on (motion only, no position);
@@ -650,6 +663,7 @@ final class HardwareInput: ObservableObject {
     /// the notifications; the identity set decides what is news.
     private var attachedMice = Set<ObjectIdentifier>()
     private var gcDeltaSeen = false
+    private var gcButtonsSeen = Set<MouseButton>()
     private var uikitSeen = false
     private var touchClassLogged = 0
     private var phoneLockNoted = false
@@ -1010,6 +1024,7 @@ final class HardwareInput: ObservableObject {
 
     private func detachMouse(_ mouse: GCMouse?) {
         if let mouse { attachedMice.remove(ObjectIdentifier(mouse)) }
+        gcButtonsSeen.removeAll()
         pendingButtons.removeAll()
         gameButtons.removeAll()
         syncButtons()
@@ -1108,7 +1123,7 @@ final class HardwareInput: ObservableObject {
             let p = DesktopCursor.advance(x: Double(cur.x), y: Double(cur.y), dx: dx, dy: dy,
                                           width: desk.w, height: desk.h)
             MetalBackedView.cursor = CGPoint(x: p.x, y: p.y)
-            if sync {
+            if sync && HardwareInput.shared.cursorShownForRoute {
                 // Also draws the arrow (winios_pointer draws absolute moves).
                 winios_pointer(Int32(p.x), Int32(p.y), Self.moveFlag | Self.absoluteFlag, 0)
             } else {
@@ -1181,6 +1196,7 @@ final class HardwareInput: ObservableObject {
     /// press happens; a release always follows its press. Main thread.
     private func buttonChanged(_ b: MouseButton, _ pressed: Bool, at t: CFTimeInterval) {
         gcButtonSeen = true
+        gcButtonsSeen.insert(b)
         if pressed {
             setMouseInUse(true)
             refreshFocus("button")
@@ -1241,8 +1257,8 @@ final class HardwareInput: ObservableObject {
     // MARK: - route, drawn cursor and automatic lock
 
     private var cursorShownForRoute: Bool {
-        if Self.desktopMode { return true }
-        return directCursorLive && cursorState.shown != 0
+        PointerPolicy.cursorShown(desktop: Self.desktopMode, directEnabled: Self.directCursorEnabled,
+                                  reports: cursorState.reports, shown: cursorState.shown != 0)
     }
 
     private func updateRoute() {
@@ -1260,7 +1276,7 @@ final class HardwareInput: ObservableObject {
     /// The driver's position reports are wanted while the drawn cursor follows
     /// Wine's cursor, and as the automatic lock's sign of a live program.
     private func updateTracking() {
-        guard directCursorLive else { return }
+        guard Self.directCursorEnabled else { return }
         let on = mouseInUse && (currentRoute == .relative || lastAbsolute == nil)
         winios_direct_cursor_track(on ? 1 : 0)
     }
@@ -1310,7 +1326,7 @@ final class HardwareInput: ObservableObject {
     }
 
     private func updateAutoLock() {
-        guard Self.autoLockEnabled, directCursorLive, Self.pointerLockAvailable, mousePath == .gcmouse else {
+        guard Self.autoLockEnabled, Self.directCursorEnabled, Self.pointerLockAvailable, mousePath == .gcmouse else {
             if pointerLocked && lockedByUs { setPointerLocked(false, byUs: true, why: "automatic lock unavailable") }
             return
         }
@@ -1482,8 +1498,12 @@ final class HardwareInput: ObservableObject {
     /// The complete set of buttons UIKit says are down, declared, not edged.
     /// These touches reach the game view only while the pointer is over it.
     func uikitButtons(_ want: Set<MouseButton>) {
-        guard Self.enabled, !gcLive else { return }
-        let allowed = baseFocused ? want : []
+        guard Self.enabled else { return }
+        // A raw movement report does not establish a source for mouse buttons.
+        // Keep each raw-reported button authoritative; allow the fallback for
+        // the others without dropping a raw hold or posting duplicate edges.
+        let allowed = MouseButtonSources.merge(current: gameButtons, fallback: want,
+                                               rawSeen: gcButtonsSeen, focused: baseFocused)
         if !want.isEmpty { noteUIKitPointer(); setMouseInUse(true) }
         guard allowed != gameButtons else { return }
         gameButtons = allowed

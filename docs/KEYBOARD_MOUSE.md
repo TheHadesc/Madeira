@@ -86,8 +86,8 @@ Two paths carry the mouse; whichever delivers a delta first wins and is logged:
 How motion reaches the program depends on the program's cursor:
 
 - **The program shows a cursor, and UIKit reports the pointer's position**
-  (iPad, pointer not locked; the desktop session always counts as showing
-  one): the program's cursor is put where the pointer is on the game view
+  (iPad, pointer not locked; desktop sessions also follow reported cursor
+  visibility): the program's cursor is put where the pointer is on the game view
   (absolute moves), mapped exactly as a touch is. The drawn cursor therefore
   sits under the hidden iOS pointer and never drifts away from it, and it stops
   at the edge where the pointer leaves the game view.
@@ -100,6 +100,12 @@ How motion reaches the program depends on the program's cursor:
 Buttons are left, right, middle and the two side buttons
 (`XBUTTON1`/`XBUTTON2`); continuous scrolling is summed into wheel notches of
 120, vertical and horizontal.
+
+Button sources are chosen per button. A GCMouse movement report alone does
+not disable indirect-pointer clicks: buttons without raw reports can use the
+fallback, while raw-reported buttons retain their holds without duplicate edges.
+Desktop cursor visibility/position metadata also permits relative mouse-look
+and automatic pointer lock when a desktop-hosted game hides its cursor.
 
 **Gain:** relative mouse motion has its own sensitivity (`sensMouse`, default
 1.0 = the device's deltas unchanged).
