@@ -139,6 +139,12 @@ assert(touchSequence.consume(2, beginning: false, ending: false, ignoreAtBegin: 
 assert(touchSequence.consume(2, beginning: false, ending: true, ignoreAtBegin: false))
 assert(!touchSequence.consume(2, beginning: true, ending: false, ignoreAtBegin: false))
 assert(!touchSequence.consume(2, beginning: false, ending: true, ignoreAtBegin: false))
+// Mixed finger/synthetic callbacks forwarded whole must release both presses.
+assert(touchSequence.consume(3, beginning: true, ending: false, ignoreAtBegin: true))
+assert(!touchSequence.consume(4, beginning: true, ending: false, ignoreAtBegin: false))
+touchSequence.admit([3, 4])
+assert(!touchSequence.consume(3, beginning: false, ending: true, ignoreAtBegin: true))
+assert(!touchSequence.consume(4, beginning: false, ending: true, ignoreAtBegin: false))
 
 // Held-set diffing: declared sets converge, ups before downs, no duplicates.
 var keys = HeldEdges<Int32>()

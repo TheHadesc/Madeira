@@ -308,6 +308,8 @@ struct RawMouseButtons<Device: Hashable> {
 struct TouchSequenceFilter<Identity: Hashable> {
     private var ignored: Set<Identity> = []
 
+    mutating func admit(_ ids: Set<Identity>) { ignored.subtract(ids) }
+
     mutating func consume(_ id: Identity, beginning: Bool, ending: Bool, ignoreAtBegin: Bool) -> Bool {
         if beginning {
             if ignoreAtBegin { ignored.insert(id) } else { ignored.remove(id) }
@@ -1100,7 +1102,9 @@ final class HardwareInput: ObservableObject {
             mouseQueue.async { [weak self] in
                 guard let self else { return }
                 self.rawProfiles.removeValue(forKey: device)
-                self.deliverRawButtons(self.rawButtons.detach(device), source: "disconnect")
+                // Main already released posted buttons and cleared source
+                // authority. Do not re-establish it with a stale queued up.
+                _ = self.rawButtons.detach(device)
             }
         }
         gcButtonsSeen.removeAll()
@@ -1567,7 +1571,12 @@ final class HardwareInput: ObservableObject {
                                                ending: phase == .ended || phase == .cancelled, ignoreAtBegin: ignore)
             if !consumed { drop = false }
         }
-        if !drop, phase == .began { setMouseInUse(false) }
+        if !drop, phase == .began {
+            // A mixed callback is forwarded whole by this interface. Every
+            // admitted press must therefore retain its release.
+            touchFilter.admit(Set(touches.map { ObjectIdentifier($0) }))
+            setMouseInUse(false)
+        }
         return drop
     }
 
