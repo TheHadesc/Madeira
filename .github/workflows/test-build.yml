@@ -1,0 +1,201 @@
+name: Current main Debug IPA
+
+on:
+  push:
+    branches: [codex/current-main-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vcruntime:
+    runs-on: windows-2025
+    steps:
+      - name: Collect unmodified Microsoft runtime DLLs from the Windows runner
+        shell: pwsh
+        run: |
+          $runtimeDir = Join-Path $env:RUNNER_TEMP 'x86_64-vcruntime'
+          New-Item -ItemType Directory -Path $runtimeDir | Out-Null
+          $runtimeNames = @('concrt140', 'msvcp140', 'msvcp140_1', 'msvcp140_2',
+            'msvcp140_atomic_wait', 'msvcp140_codecvt_ids', 'vcamp140', 'vccorlib140',
+            'vcomp140', 'vcruntime140', 'vcruntime140_1', 'vcruntime140_threads')
+          foreach ($runtimeName in $runtimeNames) {
+            $runtimeFile = Join-Path $env:WINDIR "System32/$runtimeName.dll"
+            $runtimeSignature = Get-AuthenticodeSignature -LiteralPath $runtimeFile
+            if ($runtimeSignature.Status -ne 'Valid' -or
+                $runtimeSignature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+              throw "Missing or unverified Microsoft runtime: $runtimeName"
+            }
+            Copy-Item -LiteralPath $runtimeFile -Destination $runtimeDir
+          }
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: microsoft-vcruntime
+          path: ${{ runner.temp }}/x86_64-vcruntime/*.dll
+          if-no-files-found: error
+          retention-days: 3
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout current upstream pinned components
+        run: git submodule update --init --depth 1
+      - name: Host C and Swift regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift --version
+          bash madeira-dock/tools/check.sh
+          python3 madeira-dock/tools/check-privacy.py
+          python3 tests/host/check-steam-games.py
+          python3 tests/host/check-dock-contract.py
+          python3 tests/host/check-dock-report.py
+          python3 tests/host/check-config-catalog.py
+          python3 tests/host/check-touch-gamepad.py
+          python3 tests/host/check-gamepad.py
+
+  ios:
+    needs: vcruntime
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout current upstream pinned components
+        run: git submodule update --init --recursive --depth 1
+      - name: Xcode and iOS SDK
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: microsoft-vcruntime
+          path: app/Madeira/x86_64-vcruntime
+      - name: Pinned LLVM-MinGW
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p toolchains
+          curl --fail --location --retry 3 \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/llvm-mingw-20260421-ucrt-macos-universal.tar.xz \
+            -o "$RUNNER_TEMP/llvm-mingw.tar.xz"
+          echo "bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7  $RUNNER_TEMP/llvm-mingw.tar.xz" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/llvm-mingw.tar.xz" -C toolchains
+      - name: Build and stage the updated Dock
+        run: bash build/madeira-dock/build.sh --check
+        env:
+          MADEIRA_DOCK_SOURCE_URL: https://github.com/willfaust/madeira-dock
+      - name: Python prerequisites for FEX generators
+        run: |
+          python3 -m venv "$RUNNER_TEMP/fex-python"
+          "$RUNNER_TEMP/fex-python/bin/python" -m pip install packaging==25.0
+          echo "$RUNNER_TEMP/fex-python/bin" >> "$GITHUB_PATH"
+      - name: Build FEX with the project script
+        run: bash build/fex-ios/build.sh
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 3
+      - name: Install native build prerequisites
+        run: |
+          brew install bison ninja pkgconf
+          mkdir -p "$RUNNER_TEMP/native-tools"
+          ln -s "$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/llvm-objcopy" "$RUNNER_TEMP/native-tools/llvm-objcopy"
+          echo "$RUNNER_TEMP/native-tools" >> "$GITHUB_PATH"
+          xcodebuild -downloadComponent MetalToolchain
+      - name: Restore native prerequisite builds
+        id: native-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+            build/gnutls-ios/obj
+            toolchains/gnutls-ios
+            build/ffmpeg/obj
+            toolchains/ffmpeg-ios
+          key: native-xcode27-arm64-${{ hashFiles('build/gnutls-ios/build.sh', 'build/ffmpeg/build.sh', 'build/freetype-ios/build.sh') }}-${{ github.run_id }}
+          restore-keys: native-xcode27-arm64-${{ hashFiles('build/gnutls-ios/build.sh', 'build/ffmpeg/build.sh', 'build/freetype-ios/build.sh') }}-
+      - name: Build Wine, crypto, media, fonts and pairing
+        run: bash build/ci-native.sh
+      - name: Restore the pinned iOS LLVM build
+        id: llvm-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            toolchains/llvm-project
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+          key: ios-llvm-xcode27-arm64-8dfdcc7b7-${{ hashFiles('build/ci-llvm.sh') }}-${{ github.run_id }}
+          restore-keys: |
+            ios-llvm-xcode27-arm64-8dfdcc7b7-${{ hashFiles('build/ci-llvm.sh') }}-
+            ios-llvm-xcode27-arm64-8dfdcc7b7-
+      - name: Build iOS LLVM and DXMT
+        run: bash build/ci-llvm.sh
+      - name: Build Debug app without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash build/stage-licenses.sh
+          xcodebuild -project app/Madeira.xcodeproj -scheme Madeira \
+            -configuration Debug -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/madeira-derived" \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
+      - name: Package unsigned IPA for sideload signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/package/Payload"
+          ditto "$RUNNER_TEMP/madeira-derived/Build/Products/Debug-iphoneos/Madeira.app" \
+            "$RUNNER_TEMP/package/Payload/Madeira.app"
+          printf "upstream=48f976429c189f8396e23d251d8a82f43c705922\nbuild=%s\nconfiguration=Debug\n" "$GITHUB_SHA" > "$RUNNER_TEMP/package/Payload/Madeira.app/madeira-build-source.txt"
+          cd "$RUNNER_TEMP/package"
+          zip -qry Madeira-main-48f9764-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: Madeira-main-48f9764-unsigned
+          path: ${{ runner.temp }}/package/Madeira-main-48f9764-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 3
+      - name: Save native prerequisite progress
+        if: always() && !cancelled() && steps.native-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@v6.1.0
+        with:
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+          path: |
+            research/freetype
+            build/freetype-ios/build
+            build/gnutls-ios/obj
+            toolchains/gnutls-ios
+            build/ffmpeg/obj
+            toolchains/ffmpeg-ios
+      - name: Save LLVM build progress
+        if: always() && !cancelled() && steps.llvm-cache.outputs.cache-primary-key != ''
+        uses: actions/cache/save@v6.1.0
+        with:
+          key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
+          path: |
+            toolchains/llvm-project
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+      - name: Build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: iOS-build-diagnostics
+          path: |
+            ${{ runner.temp }}/ios-build.log
+            FEX/build-ios/CMakeFiles/CMakeConfigureLog.yaml
+            build/**/*.err
+            build/**/*.log
+            build/**/err-*.txt
+            wine/build-macos/config.log
+          if-no-files-found: ignore
+          retention-days: 3

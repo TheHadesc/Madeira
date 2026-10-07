@@ -181,6 +181,33 @@ compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
 compile_objc "$DXMT_SRC/winemetal/unix/cache.c"          cache
 
 echo "=== airconv (C++ 20, needs LLVM headers) ==="
+# Match src/airconv/meson.build: embed the three AIR bitcode files, not
+# metallib containers. airconv_context.cpp links these into converted shaders.
+mkdir -p "$BUILD_DIR/shader-headers"
+for shader in air_msad air_samplepos air_tessellation; do
+    shader_src="$DXMT_SRC/airconv/shaders/$shader.metal"
+    if [ "$shader" = air_tessellation ]; then
+        # Xcode 27 changed the private __metal builtin's signature. Use the
+        # public MSL atomic API with the same threadgroup, relaxed increment.
+        # Transform a build copy so the pinned DXMT source remains unchanged.
+        python3 - "$shader_src" "$BUILD_DIR/shader-headers/$shader.metal" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+old = '__metal_atomic_fetch_add_explicit(out_count, 1, int(memory_order_relaxed), __METAL_MEMORY_SCOPE_THREADGROUP__)'
+new = 'atomic_fetch_add_explicit(reinterpret_cast<threadgroup atomic_int *>(out_count), 1, memory_order_relaxed)'
+if source.count(old) != 1:
+    raise SystemExit('Unexpected tessellation atomic source; refusing to transform it')
+Path(sys.argv[2]).write_text(source.replace(old, new))
+PY
+        shader_src="$BUILD_DIR/shader-headers/$shader.metal"
+    fi
+    xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+        -o "$BUILD_DIR/shader-headers/$shader.air" \
+        -c "$shader_src"
+    xxd -n "$shader" -i "$BUILD_DIR/shader-headers/$shader.air" \
+        "$BUILD_DIR/shader-headers/$shader.h"
+done
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
            dxbc_converter_basicblock.cpp dxbc_converter_cfg.cpp \

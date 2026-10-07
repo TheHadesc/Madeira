@@ -16,9 +16,6 @@ mkdir -p "$OBJ_DIR"
 if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
     if [ -f "$APP_LIB" ]; then
         cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
-    else
-        echo "ERROR: No base libwineserver.a found"
-        exit 1
     fi
 fi
 
@@ -153,6 +150,22 @@ esac
 
 echo ""
 echo "=== Updating libwineserver.a ==="
+
+# A fresh checkout has no base archive. Compile the unchanged server members
+# with the same iOS configuration, while the replacements above provide the
+# ported members. Existing development archives still follow the update path.
+if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
+    echo "=== Building base wineserver archive from source ==="
+    for src in "$WINE_SRC/server/"*.c; do
+        name=$(basename "$src" .c)
+        replaced=0
+        for entry in "${PATCHED_FILES[@]}"; do
+            if [ "${entry##*:}" = "$name.o" ]; then replaced=1; break; fi
+        done
+        if [ "$replaced" = 0 ]; then compile_one "$src" "$name"; fi
+    done
+    ar rcs "$OBJ_DIR/libwineserver.a" "$OBJ_DIR/"*.o
+fi
 
 # Map of patched .o files to the original .o names they replace
 # Pairs of "new_obj_filename:old_obj_filename_in_archive". Plain array
