@@ -106,7 +106,7 @@ jobs:
           CMAKE_BUILD_PARALLEL_LEVEL: 3
       - name: Install native build prerequisites
         run: |
-          brew install bison ninja pkgconf
+          brew install bison ninja pkgconf meson
           mkdir -p "$RUNNER_TEMP/native-tools"
           ln -s "$GITHUB_WORKSPACE/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/llvm-objcopy" "$RUNNER_TEMP/native-tools/llvm-objcopy"
           echo "$RUNNER_TEMP/native-tools" >> "$GITHUB_PATH"
