@@ -1,0 +1,28 @@
+name: Mouse routing rollback checks
+on:
+  push:
+    branches: [codex/mouse-routing-switch-check]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, xcode-27]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout pinned sources
+        run: git submodule update --init --depth 1
+      - name: Check hardware input and both rollback modes
+        run: python3 tests/host/check-hardware-input.py
+      - name: Check settings catalog
+        run: python3 tests/host/check-config-catalog.py
+      - name: Parse the complete Swift input implementation
+        if: runner.os == 'macOS'
+        run: xcrun --sdk iphoneos swiftc -frontend -parse -target arm64-apple-ios17.0 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" app/Madeira/HardwareInput.swift
